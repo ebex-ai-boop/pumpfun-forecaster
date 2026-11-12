@@ -6,40 +6,54 @@ Reads /input/history.ndjson + /input/task.json, writes /output/forecast.json
 Method
 ------
 Each coin's log10 market cap (in SOL) is a latent path. It starts at the
-last observed log-cap, drifts with the coin's recent log-cap velocity
-(weighted linear fit, shrunk toward the global median drift -- most
-pump.fun coins fade within hours, so the global drift is negative -- and
-decaying with a half-life), and diffuses with a per-coin sigma (residual
-std, shrunk toward the global median sigma, floored). In every simulated
-path the coins are re-ranked by simulated cap at each of the task's seven
-answer reads; the fraction of (path, read) pairs in which a coin holds
-place k is its forecast probability for that place, and the simulated
-caps at each place give that place's size-bin probabilities. The same
-simulation prices both the order and the sizes.
+last observed log-cap and follows an Ornstein-Uhlenbeck process: it
+diffuses with a per-coin sigma (residual std, shrunk toward the global
+median sigma, floored) and reverts toward the chart's median log-cap
+(the pack level) at speed theta. Trend-following drift is ZERO: 10-minute
+trends are pure noise, and any trend extrapolation hurts at both
+horizons. The reversion ramps up over the first hours (no reversion is
+visible at 10-minute scale; full reversion is measured at ~10h), and the
+OU pull is integrated in small substeps so a long first read interval
+cannot destabilise the Euler step. In every simulated path the coins are
+re-ranked by simulated cap at each of the task's seven answer reads; the
+fraction of (path, read) pairs in which a coin holds place k is its
+forecast probability for that place, and the simulated caps at each place
+give that place's size-bin probabilities. The same simulation prices both
+the order and the sizes. The simulation is blended with the house
+persistence baseline, with the persistence weight decaying over ~2h.
 
-Calibration (PC backtests, 5 sweep rounds: 108-config grid + focused
-coordinate descent + combination rounds, 3 short-horizon splits of the
-kit history scored with the competition's log-score rule, plus a
-long-horizon pseudo-read ~10.4h after the kit cut built from live
-DexScreener caps of all 454 kit mints; multi-seed spread 0.04 short /
-0.10 long over seeds 12345/999/2026):
-  * drift must be ZERO (0.0): 10-minute trends are pure noise, and any
-    trend-following hurts at both horizons;
-  * the vol floor must be HIGH (0.40): per-coin vol from 6 marks is
-    badly underestimated; more diffusion helps at both horizons;
-  * tempering helps more (alpha 0.6), persistence must decay faster
+Calibration (v2: 5 sweep rounds on the PC; v3: mean-reversion round on
+the VM, 3 short-horizon splits of the kit history scored with the
+competition's log-score rule, plus THREE long-horizon pseudo-reads
+~10.4h / ~11.4h / ~12.2h after the kit cut built from live DexScreener
+caps of all 454 kit mints; multi-seed spread 0.04 short / 0.38 long
+over seeds 12345/999/2026):
+  * drift must be ZERO (0.0): 10-minute trends are pure noise;
+  * mean reversion is the dominant long-horizon effect (theta 1.0,
+    ramp 3h, level = chart median): over ~10.4h the cohort's median
+    log-cap shifted only +0.005 dex while the top-5 crashed from
+    log-cap 3.28-3.56 to 1.64-2.12 and the new top-5 came from ranks
+    14-31. v2's long-horizon size score was pure floor (-30.2); v3's
+    is -3.5. A common downward drift would be wrong (it moves the
+    median too); only OU pulls the extremes while leaving the pack;
+  * with reversion on, the vol floor drops to 0.30 (the stationary
+    spread is sigma/sqrt(2*theta)) and the persistence size sd back
+    to 0.35 (tighter fits short horizons once the MC handles the
+    long-horizon spread);
+  * tempering helps (alpha 0.6), persistence must decay fast
     (tau 2.0h), and only 15 coins per place are named: at long horizon
     the cohort churns completely, so the unnamed share prices the
     churn better than naming a 16th-20th coin at a tiny p;
-  * size tails must be FAT (size_floor 0.003, persist_sd 0.5,
-    size_named 0.99): the whole cohort's caps crash ~97% in 10 hours,
-    so the true size bins sit far below the predicted centre;
-  * shipped mean -37.71 short-horizon (vs house baseline -37.77, vs
-    v1 -39.64) and -54.30 on the long pseudo-read (vs baseline -72.14,
-    vs v1 -68.29): the simulation now beats persistence at BOTH
-    horizons. The practice score on submit is the real short-horizon
-    check; a second, held-out DexScreener snapshot validates the
-    long-horizon edge before submitting.
+  * tested and REJECTED: a lower reversion level for pool (graduated)
+    coins (+0.18 order, -0.18 size on both snapshots, net ~0 --
+    mean reversion already captures it), and persist_tau_h 3.0
+    (hurts the short score);
+  * shipped mean -37.89 short-horizon (vs house baseline -37.77, vs
+    v2 -37.71) and -27.3 / -27.1 / -26.7 on the three long
+    pseudo-reads (vs baseline -72.14, vs v2 -54.30 / -54.32 /
+    -54.27): the simulation now beats persistence by ~+27 points
+    at the final's 7-13h horizon, confirmed on a held-out third
+    snapshot taken after tuning.
 
 Standard library only, no network, deterministic: a fixed seed, ties
 broken by mint address, so two runs on the same history are byte-identical.
@@ -57,8 +71,9 @@ PARAMS = {
     "drift_scale": 0.0,      # no trend-following: 10-min trends are noise
     "drift_halflife_h": 6.0,  # unused at drift_scale 0.0, kept for shape
     "drift_cap": 1.0,        # max |drift|, log10 SOL per hour
-    "vol_floor": 0.40,       # min hourly log10-cap sigma (high: 6-mark
-                             # vol estimates badly understate true vol)
+    "vol_floor": 0.30,       # min hourly log10-cap sigma (0.40 in v2;
+                             # with mean reversion the stationary spread
+                             # is sigma/sqrt(2*theta), so 0.30 suffices)
     "vol_mult": 1.0,
     "alpha": 0.6,            # tempering exponent on occupancy
     "floor": 0.0005,         # added to every candidate's occupancy before tempering
@@ -67,12 +82,43 @@ PARAMS = {
                              # take the unnamed share, which prices them better
                              # than a tiny named p would
     "persist_tau_h": 2.0,    # horizon half-life of the persistence blend
-    "persist_sd": 0.5,       # sd of the persistence size normal (log10 SOL)
+    "persist_sd": 0.35,      # sd of the persistence size normal (log10 SOL);
+                             # 0.35 (v2 used 0.5): tighter fits short
+                             # horizons better once the MC handles the
+                             # long-horizon spread via mean reversion
     "size_floor": 0.003,     # per-bin floor for sizes (fat tails: caps crash)
     "size_named": 0.99,      # mass named per place's sizes
     "cand_top": 60,          # last chart's top N are candidates
     "cand_recent": 30,       # plus any coin top-N in the last 3 marks
     "seed": 12345,
+    # v3: Ornstein-Uhlenbeck mean reversion toward the chart's median
+    # log-cap. Measured, not guessed: over ~10.4h the kit cohort's
+    # same-mint median log-cap shifted only +0.005 dex, while the top-5
+    # (log-cap 3.28-3.56) crashed to 1.64-2.12 and the new top-5 came
+    # from ranks 14-31. Leaders revert to the pack; the pack stays put.
+    # A common downward drift would be wrong (it moves the median too);
+    # OU pulls only the extremes.
+    "mr_theta": 1.0,         # mean-reversion speed, per hour
+    "mr_level": None,        # None = median log-cap of the last chart
+    # v3b: reversion ramps up over the first mr_ramp_h hours. The kit
+    # history shows ~no reversion at 10-min scale, while the 10h
+    # snapshots show full reversion; the shape between is unobserved.
+    # A ramp keeps short horizons (practice) intact and costs nothing
+    # on the final, whose reads are all 7-13h out (fully reverted by
+    # then either way). 0.0 = no ramp (constant theta from t=0).
+    "mr_ramp_h": 3.0,
+    # Numerical safety: the OU pull is integrated in substeps of at most
+    # mr_max_dt hours. Euler with theta*dt > 1 OSCILLATES and reverses
+    # the ranking (the final's first read step is 7h; theta=1.0 would
+    # give theta*dt = 7). 0.25h keeps theta*dt <= 0.25 for theta <= 1.
+    "mr_max_dt": 0.25,
+    # v3c (TESTED AND REJECTED): pool (graduated) coins revert toward a
+    # lower level than curve coins. Measured: 14 of the last mark's 15
+    # pool coins fell OUT of the snapshot top-100, while 78/185 curve
+    # coins stayed in. But the delta bought +0.18 order and lost -0.18
+    # size on both snapshots (net ~0): mean reversion already captures
+    # the effect. Kept at 0.0; do not re-enable without fresh evidence.
+    "mr_pool_delta": 0.0,
 }
 
 
@@ -196,12 +242,26 @@ def forecast(input_dir, params=None):
         v = w * vols.get(uid, g_vol) + (1.0 - w) * g_vol
         sigma[uid] = max(p["vol_floor"], p["vol_mult"] * v)
 
+    # Mean-reversion level: the chart's median log-cap (the pack level
+    # leaders revert toward). Computed from the last mark, deterministic.
+    # Pool coins revert toward a lower level (mr_pool_delta < 0).
+    mr_level = p["mr_level"]
+    if mr_level is None:
+        mr_level = _median(list(last_cap.values()))
+    venue = {r["mint"]: r.get("venue", "curve") for r in last_rows}
+    level = {uid: mr_level + (p["mr_pool_delta"] if venue.get(uid) == "pool" else 0.0)
+             for uid in cand}
+
     # Monte-Carlo: one path is a full trajectory; record at each read.
+    # The OU pull is integrated in substeps (<= mr_max_dt) so a long
+    # first read interval cannot destabilise the Euler step.
     rng = random.Random(p["seed"])
     n_reads = len(offsets)
     occ = {k: {uid: 0 for uid in cand} for k in range(1, places + 1)}
     size_hits = {k: [0] * (len(edges) + 1) for k in range(1, places + 1)}
     total_slots = p["n_paths"] * n_reads
+    ramp = p["mr_ramp_h"]
+    max_dt = p["mr_max_dt"]
     for _ in range(p["n_paths"]):
         x = {uid: start[uid] + rng.gauss(0, 0.02) for uid in cand}
         t_prev = 0.0
@@ -209,11 +269,18 @@ def forecast(input_dir, params=None):
             dt = off - t_prev
             t_prev = off
             if dt > 0:
-                t_mid = off - 0.5 * dt
-                decay = 0.5 ** (t_mid / p["drift_halflife_h"])
-                sq = math.sqrt(dt)
-                for uid in cand:
-                    x[uid] += drift[uid] * decay * dt + rng.gauss(0, sigma[uid] * sq)
+                n_sub = max(1, math.ceil(dt / max_dt))
+                h = dt / n_sub
+                sq = math.sqrt(h)
+                t0 = off - dt
+                for j in range(n_sub):
+                    t_mid = t0 + (j + 0.5) * h
+                    decay = 0.5 ** (t_mid / p["drift_halflife_h"])
+                    th_eff = (p["mr_theta"] * min(1.0, t_mid / ramp)
+                              if ramp > 0 else p["mr_theta"])
+                    for uid in cand:
+                        ou = -th_eff * (x[uid] - level[uid])
+                        x[uid] += (drift[uid] * decay + ou) * h + rng.gauss(0, sigma[uid] * sq)
             order = sorted(cand, key=lambda u: (-x[u], u))
             for k in range(1, places + 1):
                 uid = order[k - 1]
