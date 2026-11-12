@@ -17,23 +17,29 @@ place k is its forecast probability for that place, and the simulated
 caps at each place give that place's size-bin probabilities. The same
 simulation prices both the order and the sizes.
 
-Calibration (PC backtest, 108-config sweep + focused re-test, 3 splits
-of the kit history scored with the competition's log-score rule;
-multi-seed spread 0.08 over seeds 12345/999/2026):
-  * drift must be small (0.2): 10-minute trends are mostly noise, and
-    drift 0.8 never reached the top 10;
-  * tempering helps (alpha 0.75 in all top-10 configs; alpha 1.0 in
-    all worst-3);
-  * only half of each place's mass is named (0.5): the unnamed share
-    prices the churn and the coins born after the cut;
-  * only the top 20 coins per place are named: a coin named at a tiny
-    p scores worse than the unnamed share would give it;
-  * shipped mean -39.64 vs the house baseline -37.77 on these
-    short-horizon (10-30 min) splits: persistence wins at minutes.
-    The final is scored 7-13 hours out, where the simulation (which
-    the blend weight hands over to as the horizon grows) is the
-    edge the splits cannot measure. The practice score on submit
-    is the real short-horizon check.
+Calibration (PC backtests, 5 sweep rounds: 108-config grid + focused
+coordinate descent + combination rounds, 3 short-horizon splits of the
+kit history scored with the competition's log-score rule, plus a
+long-horizon pseudo-read ~10.4h after the kit cut built from live
+DexScreener caps of all 454 kit mints; multi-seed spread 0.04 short /
+0.10 long over seeds 12345/999/2026):
+  * drift must be ZERO (0.0): 10-minute trends are pure noise, and any
+    trend-following hurts at both horizons;
+  * the vol floor must be HIGH (0.40): per-coin vol from 6 marks is
+    badly underestimated; more diffusion helps at both horizons;
+  * tempering helps more (alpha 0.6), persistence must decay faster
+    (tau 2.0h), and only 15 coins per place are named: at long horizon
+    the cohort churns completely, so the unnamed share prices the
+    churn better than naming a 16th-20th coin at a tiny p;
+  * size tails must be FAT (size_floor 0.003, persist_sd 0.5,
+    size_named 0.99): the whole cohort's caps crash ~97% in 10 hours,
+    so the true size bins sit far below the predicted centre;
+  * shipped mean -37.71 short-horizon (vs house baseline -37.77, vs
+    v1 -39.64) and -54.30 on the long pseudo-read (vs baseline -72.14,
+    vs v1 -68.29): the simulation now beats persistence at BOTH
+    horizons. The practice score on submit is the real short-horizon
+    check; a second, held-out DexScreener snapshot validates the
+    long-horizon edge before submitting.
 
 Standard library only, no network, deterministic: a fixed seed, ties
 broken by mint address, so two runs on the same history are byte-identical.
@@ -48,21 +54,22 @@ from datetime import datetime
 # Tuned on the PC backtest (see docstring); do not retune per run.
 PARAMS = {
     "n_paths": 3000,
-    "drift_scale": 0.2,      # shrink on per-coin log-cap drift (per hour)
-    "drift_halflife_h": 6.0,  # drift decays with this half-life
+    "drift_scale": 0.0,      # no trend-following: 10-min trends are noise
+    "drift_halflife_h": 6.0,  # unused at drift_scale 0.0, kept for shape
     "drift_cap": 1.0,        # max |drift|, log10 SOL per hour
-    "vol_floor": 0.10,       # min hourly log10-cap sigma
+    "vol_floor": 0.40,       # min hourly log10-cap sigma (high: 6-mark
+                             # vol estimates badly understate true vol)
     "vol_mult": 1.0,
-    "alpha": 0.75,           # tempering exponent on occupancy
+    "alpha": 0.6,            # tempering exponent on occupancy
     "floor": 0.0005,         # added to every candidate's occupancy before tempering
     "named_sum": 0.5,        # mass named per place; the rest stays unnamed
-    "max_named": 20,         # name only the top-N coins per place; the rest
+    "max_named": 15,         # name only the top-N coins per place; the rest
                              # take the unnamed share, which prices them better
                              # than a tiny named p would
-    "persist_tau_h": 3.0,    # horizon half-life of the persistence blend
-    "persist_sd": 0.35,      # sd of the persistence size normal (log10 SOL)
-    "size_floor": 0.0005,    # per-bin floor for sizes
-    "size_named": 0.95,      # mass named per place's sizes
+    "persist_tau_h": 2.0,    # horizon half-life of the persistence blend
+    "persist_sd": 0.5,       # sd of the persistence size normal (log10 SOL)
+    "size_floor": 0.003,     # per-bin floor for sizes (fat tails: caps crash)
+    "size_named": 0.99,      # mass named per place's sizes
     "cand_top": 60,          # last chart's top N are candidates
     "cand_recent": 30,       # plus any coin top-N in the last 3 marks
     "seed": 12345,

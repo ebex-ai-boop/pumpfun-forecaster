@@ -6,11 +6,11 @@ new pump.fun coins by market cap, 24 hours out, with honest probabilities.
 ## Method
 
 Monte-Carlo cap diffusion. Each coin's log10 market cap (in SOL) is a
-latent path: it starts at the last observed log-cap, drifts with the
-coin's recent log-cap velocity (weighted linear fit, shrunk toward the
-global median drift and decaying with a half-life), and diffuses with a
+latent path: it starts at the last observed log-cap and diffuses with a
 per-coin sigma (residual std, shrunk toward the global median sigma,
-floored). In every simulated path the coins are re-ranked by simulated
+floored at 0.40 log10 SOL/hour — vol from six 10-minute marks badly
+understates true vol). No drift is used: backtests showed 10-minute
+log-cap trends are pure noise, so trend-following only hurts. In every simulated path the coins are re-ranked by simulated
 cap at each of the task's seven answer reads; the fraction of (path,
 read) pairs in which a coin holds place *k* is its forecast probability
 for that place, and the simulated caps at each place give that place's
